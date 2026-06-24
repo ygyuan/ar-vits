@@ -16,11 +16,16 @@ from transformers import (
 import utils
 import torch.nn as nn
 
+cnhubert_base_path = "/apdcephfs_qy3/share_301069248/users/yougenyuan/backup/models/GPT-SoVITS/GPT_SoVITS/pretrained_models/chinese-hubert-base"
+
 class CNHubert(nn.Module):
     def __init__(self):
         super().__init__()
-        self.model = HubertModel.from_pretrained("TencentGameMate/chinese-hubert-base")
-        self.feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained("TencentGameMate/chinese-hubert-base")
+        #self.model = HubertModel.from_pretrained("TencentGameMate/chinese-hubert-base")
+        #self.feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained("TencentGameMate/chinese-hubert-base")
+        self.model = HubertModel.from_pretrained(cnhubert_base_path)
+        self.feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(cnhubert_base_path)
+
     def forward(self, x):
         input_values = self.feature_extractor(x, return_tensors="pt", sampling_rate=16000).input_values.to(x.device)
         feats = self.model(input_values)["last_hidden_state"]

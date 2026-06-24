@@ -60,17 +60,30 @@ class TextAudioSpeakerLoader(torch.utils.data.Dataset):
         print("wav_data_len:", len(self.audiopaths_sid_text))
         os.makedirs(os.path.join(self.data_dir, "7-spec"), exist_ok=True)
 
-        audiopaths_sid_text = []
+        audiopaths_sid_text_new = []
         lengths = []
+        skipped = 0
         for item in tqdm(self.audiopaths_sid_text):
-            ids = item[0]
-            audiopath, phoneme_ids, length = self.phoneme_data[ids]
-            #print(audiopath, phoneme_ids, length) 
-            audiopaths_sid_text.append([audiopath, phoneme_ids])
-            lengths.append(length)
-        self.audiopaths_sid_text = audiopaths_sid_text
+            audiopath = item[0]
+            try:
+                phoneme = self.phoneme_data[audiopath]
+                phoneme = phoneme.split(' ')
+                phoneme_ids = cleaned_text_to_sequence(phoneme)
+            except Exception:
+                print(f"{audiopath} not in self.phoneme_data !")
+                skipped += 1
+                continue
+
+            audiopath = os.path.join(self.data_dir, "5-wav32k", audiopath)
+            sslpath = audiopath.replace("5-wav32k", "4-cnhubert")+".pt"
+            if os.path.exists(audiopath) and os.path.exists(sslpath) and (os.path.getsize(audiopath) / self.sampling_rate /2 > 0.6 or self.val):
+                audiopaths_sid_text_new.append([audiopath,  phoneme_ids])
+                lengths.append(os.path.getsize(audiopath) // (2 * self.hop_length))
+            else:
+                skipped += 1
+        print("skipped: ", skipped, ", total: ", len(self.audiopaths_sid_text))
+        self.audiopaths_sid_text = audiopaths_sid_text_new
         self.lengths = lengths
-        print(len(self.audiopaths_sid_text), len(self.lengths))
 
     def get_audio_text_speaker_pair(self, audiopath_sid_text):
         audiopath, phoneme_ids = audiopath_sid_text
@@ -99,13 +112,13 @@ class TextAudioSpeakerLoader(torch.utils.data.Dataset):
         audio_norm = audio
         audio_norm = audio_norm.unsqueeze(0)
 
-        #spec_filename = filename.replace("5-wav32k", "7-spec")+".pt"
-        #if os.path.exists(spec_filename):
-        #    spec = torch.load(spec_filename, map_location="cpu")
-        #else:
-        spec = spectrogram_torch(audio_norm, self.filter_length, self.sampling_rate, self.hop_length, self.win_length, center=False)
-        spec = torch.squeeze(spec, 0)
-        #torch.save(spec, spec_filename)
+        spec_filename = filename.replace("5-wav32k", "7-spec")+".pt"
+        if os.path.exists(spec_filename):
+            spec = torch.load(spec_filename, map_location="cpu")
+        else:
+            spec = spectrogram_torch(audio_norm, self.filter_length, self.sampling_rate, self.hop_length, self.win_length, center=False)
+            spec = torch.squeeze(spec, 0)
+            torch.save(spec, spec_filename)
         return spec, audio_norm
 
     def get_sid(self, sid):

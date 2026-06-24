@@ -22,7 +22,7 @@ def process_file(data):
         return (wav_path, phones)
     else:
         return None
-for language in ["zh", 'en', 'ja']:
+#for language in ["zh", 'en', 'ja']:
     filenames = glob(f"{data_root}/{language}/**/*.wav", recursive=True)
 
     # Define the number of processes to use

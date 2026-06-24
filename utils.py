@@ -17,7 +17,7 @@ MATPLOTLIB_FLAG = False
 
 logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
 logger = logging
-
+import ffmpeg
 
 def load_checkpoint(checkpoint_path, model, optimizer=None, skip_optimizer=False):
     assert os.path.isfile(checkpoint_path)
@@ -77,10 +77,13 @@ def summarize(writer, global_step, scalars={}, histograms={}, images={}, audios=
 
 def latest_checkpoint_path(dir_path, regex="G_*.pth"):
     f_list = glob.glob(os.path.join(dir_path, regex))
-    f_list.sort(key=lambda f: int("".join(filter(str.isdigit, f))))
-    x = f_list[-1]
-    print(x)
-    return x
+    if len(f_list) == 0:
+        return None
+    else:
+        f_list.sort(key=lambda f: int("".join(filter(str.isdigit, f))))
+        x = f_list[-1]
+        print(x)
+        return x
 
 
 def plot_spectrogram_to_numpy(spectrogram):
@@ -142,12 +145,32 @@ def load_wav_to_torch(full_path):
     data, sampling_rate = librosa.load(full_path, sr=None)
     return torch.FloatTensor(data), sampling_rate
 
-
+def load_wav_to_torch_and_resample(full_path, sr=16000):
+    data, sampling_rate = librosa.load(full_path, sr=sr)
+    return torch.FloatTensor(data), sampling_rate
+    
 def load_filepaths_and_text(filename, split="|"):
     with open(filename, encoding='utf-8') as f:
         filepaths_and_text = [line.strip().split(split) for line in f]
     return filepaths_and_text
 
+def load_audio(file, sr):
+    try:
+        # https://github.com/openai/whisper/blob/main/whisper/audio.py#L26
+        # This launches a subprocess to decode audio while down-mixing and resampling as necessary.
+        # Requires the ffmpeg CLI and `ffmpeg-python` package to be installed.
+        file = (
+            file.strip(" ").strip('"').strip("\n").strip('"').strip(" ")
+        )  # 防止小白拷路径头尾带了空格和"和回车
+        out, _ = (
+            ffmpeg.input(file, threads=0)
+            .output("-", format="f32le", acodec="pcm_f32le", ac=1, ar=sr)
+            .run(cmd=["ffmpeg", "-nostdin"], capture_stdout=True, capture_stderr=True)
+        )
+    except Exception as e:
+        raise RuntimeError(f"Failed to load audio: {e}")
+
+    return np.frombuffer(out, np.float32).flatten()
 
 def get_hparams(init=True, stage=1):
     parser = argparse.ArgumentParser()

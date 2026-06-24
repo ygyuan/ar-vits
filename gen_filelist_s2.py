@@ -15,5 +15,3 @@ with open('dump/s2_train_files.list', 'w') as f:
     f.write('\n'.join(train))
 with open('dump/s2_val_files.list', 'w') as f:
     f.write('\n'.join(val))
-
-

@@ -90,7 +90,7 @@ class Text2SemanticDataset(Dataset):
             # get str
             item_name = self.semantic_data['item_name'][i]
             try:
-                phoneme = self.phoneme_data[item_name]
+                audiopath, phoneme_ids, length = self.phoneme_data[item_name]
             except Exception:
                 # print(f"{item_name} not in self.phoneme_data !")
                 num_not_in += 1
@@ -106,8 +106,8 @@ class Text2SemanticDataset(Dataset):
                 continue
 
             # (T, ), 这个速度不会很慢，所以可以在一开始就处理，无需在 __getitem__ 里面单个处理
-            phoneme = phoneme.split(' ')
-            phoneme_ids = cleaned_text_to_sequence(phoneme)
+            #phoneme = phoneme.split(' ')
+            #phoneme_ids = cleaned_text_to_sequence(phoneme)
             if len(phoneme_ids) >400:
                 num_deleted_ps += 1
                 continue

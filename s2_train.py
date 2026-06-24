@@ -33,8 +33,15 @@ from module.losses import (
 from module.mel_processing import mel_spectrogram_torch, spec_to_mel_torch
 
 torch.backends.cudnn.benchmark = True
+torch.backends.cudnn.deterministic = False
+###反正A100fp32更快，那试试tf32吧
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+torch.set_float32_matmul_precision("medium")
 global_step = 0
+#import pdb
 
+device = "cpu"  # cuda以外的设备，等mps优化后加入
 
 def main():
     """Assume Single Node Multi GPUs Training Only"""
@@ -42,10 +49,11 @@ def main():
 
     n_gpus = torch.cuda.device_count()
     os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '8000'
+    os.environ['MASTER_PORT'] = '8080'
 
     hps = utils.get_hparams(stage=2)
     mp.spawn(run, nprocs=n_gpus, args=(n_gpus, hps,))
+    #run(0, 1, hps)
 
 
 def run(rank, n_gpus, hps):
@@ -53,16 +61,18 @@ def run(rank, n_gpus, hps):
     if rank == 0:
         logger = utils.get_logger(hps.s2_ckpt_dir)
         logger.info(hps)
-        utils.check_git_hash(hps.s2_ckpt_dir)
+        #utils.check_git_hash(hps.s2_ckpt_dir)
         writer = SummaryWriter(log_dir=hps.s2_ckpt_dir)
         writer_eval = SummaryWriter(log_dir=os.path.join(hps.s2_ckpt_dir, "eval"))
 
     dist.init_process_group(backend='gloo' if os.name == 'nt' else 'nccl', init_method='env://', world_size=n_gpus,
                             rank=rank)
-    torch.manual_seed(hps.train.seed)
-    torch.cuda.set_device(rank)
+    torch.manual_seed(hps.train.seed) 
+    if torch.cuda.is_available():
+        torch.cuda.set_device(rank)
 
-    train_dataset = TextAudioSpeakerLoader(hps.data.training_files, hps.data)
+    phoneme_path = getattr(hps.data, 'phoneme_path', "dump/phoneme.npy")
+    train_dataset = TextAudioSpeakerLoader(hps.data.training_files, hps.data, phoneme_path=phoneme_path)
     train_sampler = DistributedBucketSampler(
         train_dataset,
         hps.train.batch_size,
@@ -74,7 +84,7 @@ def run(rank, n_gpus, hps):
     train_loader = DataLoader(train_dataset, num_workers=6, shuffle=False, pin_memory=True,
                               collate_fn=collate_fn, batch_sampler=train_sampler, persistent_workers=True)
     if rank == 0:
-        eval_dataset = TextAudioSpeakerLoader(hps.data.validation_files, hps.data, val=True)
+        eval_dataset = TextAudioSpeakerLoader(hps.data.validation_files, hps.data, val=True, phoneme_path=phoneme_path)
         eval_loader = DataLoader(eval_dataset, num_workers=0, shuffle=False,
                                  batch_size=1, pin_memory=True,
                                  drop_last=False, collate_fn=collate_fn)
@@ -83,12 +93,21 @@ def run(rank, n_gpus, hps):
         hps.data.filter_length // 2 + 1,
         hps.train.segment_size // hps.data.hop_length,
         n_speakers=hps.data.n_speakers,
-        **hps.model).cuda(rank)
+        **hps.model,
+    ).cuda(rank) if torch.cuda.is_available() else SynthesizerTrn(
+        hps.data.filter_length // 2 + 1,
+        hps.train.segment_size // hps.data.hop_length,
+        n_speakers=hps.data.n_speakers,
+        **hps.model,
+    ).to(device)
 
-    net_d = MultiPeriodDiscriminator(hps.model.use_spectral_norm).cuda(rank)
     for name, param in net_g.named_parameters():
         if not param.requires_grad:
             print(name,"not requires_grad")
+    #pdb.set_trace()
+
+    net_d = MultiPeriodDiscriminator(hps.model.use_spectral_norm).cuda(rank) if torch.cuda.is_available() else MultiPeriodDiscriminator(hps.model.use_spectral_norm).to(device)
+     
     optim_g = torch.optim.AdamW(
         filter(lambda p: p.requires_grad, net_g.parameters()),
         hps.train.learning_rate,
@@ -99,15 +118,17 @@ def run(rank, n_gpus, hps):
         hps.train.learning_rate,
         betas=hps.train.betas,
         eps=hps.train.eps)
-    net_g = DDP(net_g, device_ids=[rank])
-    net_d = DDP(net_d, device_ids=[rank])
+    net_g = DDP(net_g, device_ids=[rank], find_unused_parameters=True)
+    net_d = DDP(net_d, device_ids=[rank], find_unused_parameters=True)
 
     pretrain_dir = hps.pretrain
     if pretrain_dir is None:
-        _, _, _, epoch_str = utils.load_checkpoint(utils.latest_checkpoint_path(hps.s2_ckpt_dir, "G_*.pth"), net_g,
-                                                   optim_g, False)
-        _, _, _, epoch_str = utils.load_checkpoint(utils.latest_checkpoint_path(hps.s2_ckpt_dir, "D_*.pth"), net_d,
-                                                   optim_d, False)
+        epoch_str = 1
+        checkpoint_g = utils.latest_checkpoint_path(hps.s2_ckpt_dir, "G_*.pth")
+        checkpoint_d = utils.latest_checkpoint_path(hps.s2_ckpt_dir, "D_*.pth")
+        if checkpoint_g is not None and checkpoint_d is not None:
+            _, _, _, epoch_str = utils.load_checkpoint(checkpoint_g, net_g, optim_g, False)
+            _, _, _, epoch_str = utils.load_checkpoint(checkpoint_d, net_d, optim_d, False)
         epoch_str = max(epoch_str, 1)
         global_step = (epoch_str - 1) * len(train_loader)
     else:
@@ -148,15 +169,25 @@ def train_and_evaluate(rank, epoch, hps, nets, optims, schedulers, scaler, loade
 
     train_loader.batch_sampler.set_epoch(epoch)
     global global_step
-
+    
     net_g.train()
     net_d.train()
+    #pdb.set_trace()
     for batch_idx, (ssl, ssl_lengths, spec, spec_lengths, y, y_lengths, text, text_lengths) in tqdm(enumerate(train_loader)):
-        spec, spec_lengths = spec.cuda(rank, non_blocking=True), spec_lengths.cuda(rank, non_blocking=True)
-        y, y_lengths = y.cuda(rank, non_blocking=True), y_lengths.cuda(rank, non_blocking=True)
-        ssl = ssl.cuda(rank, non_blocking=True)
-        ssl_lengths = ssl_lengths.cuda(rank, non_blocking=True)
-        text, text_lengths = text.cuda(rank, non_blocking=True), text_lengths.cuda(rank, non_blocking=True)
+        if torch.cuda.is_available():
+            spec, spec_lengths = spec.cuda(rank, non_blocking=True), spec_lengths.cuda(rank, non_blocking=True)
+            y, y_lengths = y.cuda(rank, non_blocking=True), y_lengths.cuda(rank, non_blocking=True)
+            ssl = ssl.cuda(rank, non_blocking=True)
+            ssl.requires_grad = False
+            #ssl_lengths = ssl_lengths.cuda(rank, non_blocking=True)
+            text, text_lengths = text.cuda(rank, non_blocking=True), text_lengths.cuda(rank, non_blocking=True)
+        else:
+            spec, spec_lengths = spec.to(device), spec_lengths.to(device)
+            y, y_lengths = y.to(device), y_lengths.to(device)
+            ssl = ssl.to(device)
+            ssl.requires_grad = False
+            # ssl_lengths = ssl_lengths.cuda(rank, non_blocking=True)
+            text, text_lengths = text.to(device), text_lengths.to(device)
 
         with autocast(enabled=hps.train.fp16_run):
             y_hat, kl_ssl, ids_slice, x_mask, z_mask, \
@@ -247,13 +278,10 @@ def train_and_evaluate(rank, epoch, hps, nets, optims, schedulers, scaler, loade
                                       os.path.join(hps.s2_ckpt_dir, "G_{}.pth".format(global_step)))
                 utils.save_checkpoint(net_d, optim_d, hps.train.learning_rate, epoch,
                                       os.path.join(hps.s2_ckpt_dir, "D_{}.pth".format(global_step)))
-                keep_ckpts = getattr(hps.train, 'keep_ckpts', 3)
+                keep_ckpts = getattr(hps.train, 'keep_ckpts', 20)
                 if keep_ckpts > 0:
                     utils.clean_checkpoints(path_to_models=hps.s2_ckpt_dir, n_ckpts_to_keep=keep_ckpts, sort_by_time=True)
-
-
         global_step += 1
-
     if rank == 0:
         logger.info('====> Epoch: {}'.format(epoch))
 
@@ -266,7 +294,7 @@ def evaluate(hps, generator, eval_loader, writer_eval):
     print("Evaluating ...")
     with torch.no_grad():
         for batch_idx, (ssl, ssl_lengths, spec, spec_lengths, y, y_lengths, text, text_lengths) in enumerate(eval_loader):
-            print(111)
+            print(batch_idx, ssl.size(), ssl_lengths, spec.size(), spec_lengths, y.size(), y_lengths, text.size(), text_lengths)
             spec, spec_lengths = spec.cuda(), spec_lengths.cuda()
             y, y_lengths = y.cuda(), y_lengths.cuda()
             ssl = ssl.cuda()

@@ -1,7 +1,7 @@
 train:
     seed: 1234
     epochs: 100
-    batch_size: 6
+    batch_size: 16
     gradient_accumulation: 4
     save_every_n_epoch: 1
     precision: 32
@@ -24,7 +24,7 @@ model:
     hidden_dim: 512
     head: 16
     linear_units: 2048
-    n_layer: 12
+    n_layer: 24
     dropout: 0
     EOS: 1024
 inference:

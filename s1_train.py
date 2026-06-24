@@ -18,6 +18,7 @@ logging.getLogger('matplotlib').setLevel(logging.WARNING)
 torch.set_float32_matmul_precision('high')
 from AR.utils import get_newest_ckpt
 
+import pdb
 
 def main(args):
     output_dir = Path(args.output_dir)
